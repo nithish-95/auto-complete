@@ -1,15 +1,19 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"log"
+	"sort"
+	"strings"
+
+	"github.com/nsf/termbox-go"
 )
 
-// Node struct represents each node in the trie
+// Node struct represents each node in the trie with frequency
 type Node struct {
 	children    map[rune]*Node
 	isEndOfWord bool
+	frequency   int
 }
 
 // Tries struct represents the trie with a pointer to the root node
@@ -23,11 +27,12 @@ func initTries() *Tries {
 		root: &Node{
 			isEndOfWord: false,
 			children:    make(map[rune]*Node),
+			frequency:   0,
 		},
 	}
 }
 
-// Insert will take in a word and insert it into the trie
+// Insert will take in a word and insert it into the trie, updating frequency
 func (t *Tries) Insert(word string) {
 	current := t.root
 	for _, char := range word {
@@ -36,77 +41,161 @@ func (t *Tries) Insert(word string) {
 			node = &Node{
 				isEndOfWord: false,
 				children:    make(map[rune]*Node),
+				frequency:   0,
 			}
 			current.children[char] = node
 		}
 		current = node
 	}
 	current.isEndOfWord = true
+	current.frequency++ // Increment frequency only at the end of the word
 }
 
-// Search will search for a word in the trie
-func (t *Tries) Search(word string) bool {
+// Get frequency of a word in the Trie
+func (t *Tries) getFrequency(word string) int {
 	current := t.root
 	for _, char := range word {
 		node, ok := current.children[char]
 		if !ok {
-			return false
+			return 0
 		}
 		current = node
 	}
-	return current.isEndOfWord
+	return current.frequency
 }
 
-// Autocomplete will return a list of words that match the prefix
+// Autocomplete returns a list of words that match the prefix, sorted by frequency
 func (t *Tries) Autocomplete(prefix string) []string {
 	current := t.root
 	for _, char := range prefix {
 		node, ok := current.children[char]
 		if !ok {
-			return []string{} // Prefix not found
+			return []string{}
 		}
 		current = node
 	}
 
-	// Recursively collect all words starting from the current node
 	var results []string
-	t.collectWords(current, prefix, &results)
+	collectWords(current, prefix, &results)
+
+	// Sort by frequency
+	sort.Slice(results, func(i, j int) bool {
+		return t.getFrequency(results[i]) > t.getFrequency(results[j])
+	})
+
+	// Limit to top 10 suggestions
+	if len(results) > 10 {
+		results = results[:10]
+	}
+
 	return results
 }
 
-// Helper function to collect words from a given node
-func (t *Tries) collectWords(node *Node, prefix string, results *[]string) {
+// Collect words from a given node
+func collectWords(node *Node, prefix string, results *[]string) {
 	if node.isEndOfWord {
 		*results = append(*results, prefix)
 	}
 	for char, child := range node.children {
-		t.collectWords(child, prefix+string(char), results)
+		collectWords(child, prefix+string(char), results)
 	}
 }
 
 func main() {
-	testTries := initTries()
-	scanner := bufio.NewScanner(os.Stdin)
+	// Initialize termbox
+	err := termbox.Init()
+	if err != nil {
+		log.Fatalf("Failed to initialize termbox: %v", err)
+	}
+	defer termbox.Close()
 
-	// Insert sample words
-	testTries.Insert("hello")
-	testTries.Insert("hell")
-	testTries.Insert("helicopter")
-	testTries.Insert("hero")
-	testTries.Insert("world")
-	testTries.Insert("how")
-	testTries.Insert("are")
-	testTries.Insert("you")
+	// Initialize the trie
+	trie := initTries()
+	words := []string{"hello", "hell", "helicopter", "hero", "world", "how", "are", "you"}
+	for _, word := range words {
+		trie.Insert(word)
+	}
 
-	fmt.Println("Enter a prefix to autocomplete:")
-	for scanner.Scan() {
-		prefix := scanner.Text()
-		autocompleteResults := testTries.Autocomplete(prefix)
-		if len(autocompleteResults) > 0 {
-			fmt.Printf("Autocomplete results for '%s': %v\n", prefix, autocompleteResults)
-		} else {
-			fmt.Printf("No words found for prefix '%s'\n", prefix)
+	var fullSentence string
+	var currentWord string
+	var suggestions []string
+
+	render := func() {
+		termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
+
+		// Display the full sentence
+		for i, char := range fullSentence {
+			termbox.SetCell(i, 0, char, termbox.ColorDefault, termbox.ColorDefault)
 		}
-		fmt.Println("Enter a prefix to autocomplete:")
+
+		// Display the current word being typed
+		for i, char := range currentWord {
+			termbox.SetCell(len(fullSentence)+i+1, 0, char, termbox.ColorGreen, termbox.ColorDefault)
+		}
+
+		// Display suggestions
+		for i, suggestion := range suggestions {
+			line := fmt.Sprintf("%d. %s", i+1, suggestion)
+			for j, char := range line {
+				termbox.SetCell(j, i+1, char, termbox.ColorDefault, termbox.ColorDefault)
+			}
+		}
+
+		termbox.Flush()
+	}
+
+	for {
+		render()
+
+		ev := termbox.PollEvent()
+		if ev.Type == termbox.EventKey {
+			switch ev.Key {
+			case termbox.KeyEsc:
+				return // Exit on Escape key
+			case termbox.KeyBackspace, termbox.KeyBackspace2:
+				// Handle backspace
+				if len(currentWord) > 0 {
+					currentWord = currentWord[:len(currentWord)-1]
+				} else if len(fullSentence) > 0 {
+					words := strings.Fields(fullSentence)
+					if len(words) > 0 {
+						currentWord = words[len(words)-1]
+						fullSentence = strings.Join(words[:len(words)-1], " ")
+					}
+				}
+			case termbox.KeySpace:
+				// Finalize the current word
+				if currentWord != "" {
+					fullSentence += currentWord + " "
+					if trie.getFrequency(currentWord) == 0 {
+						trie.Insert(currentWord)
+					}
+					currentWord = ""
+				}
+			case termbox.KeyTab:
+				// Autocomplete the current word with the top suggestion
+				if len(suggestions) > 0 {
+					currentWord = suggestions[0]
+				}
+			case termbox.KeyEnter:
+				// Finalize the sentence
+				if currentWord != "" {
+					fullSentence += currentWord + " "
+					if trie.getFrequency(currentWord) == 0 {
+						trie.Insert(currentWord)
+					}
+					currentWord = ""
+				}
+				fmt.Println("\nYour sentence:", fullSentence)
+				return
+			default:
+				if ev.Ch != 0 {
+					currentWord += string(ev.Ch)
+				}
+			}
+
+			// Update suggestions for the current word
+			suggestions = trie.Autocomplete(currentWord)
+		}
 	}
 }
